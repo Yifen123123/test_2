@@ -13,9 +13,13 @@ def extract_title(text: str) -> str:
     for line in lines:
         line = line.strip()
         if not line:
-            if capture:  # 已經在抓取中，遇到空行就停
+            if capture:
                 break
             continue
+
+        # 去掉開頭的「. .. ...」噪音
+        line = re.sub(r"^\.{1,}\s*", "", line)
+
         # 開始條件
         if not capture and re.search(r"(主旨|案由|標題)\s*[:：]", line):
             capture = True
@@ -24,12 +28,17 @@ def extract_title(text: str) -> str:
             if line:
                 collected.append(line)
             continue
+
         # 停止條件
         if capture and any(sw in line for sw in STOP_WORDS):
             break
+
         # 拼接
         if capture:
             collected.append(line)
+
+    return " ".join(collected) if collected else (lines[0] if lines else "")
+
 
     # fallback: 如果完全沒抓到，就用第一行
     return " ".join(collected) if collected else (lines[0] if lines else "")
