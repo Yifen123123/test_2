@@ -5,43 +5,53 @@ from pathlib import Path
 # 停止條件：遇到這些關鍵詞就不再繼續拼接
 STOP_WORDS = ["說明", "依據", "附件", "承辦人", "受文者", "發文日期"]
 
+import re
+
+# 行首才算欄位標題的停止條件
+STOP_HEADINGS = r"(說明|理由)"
+STOP_RE = re.compile(rf"^\s*{STOP_HEADINGS}\s*[:：]?\s*$|^\s*{STOP_HEADINGS}\s*[:：]", re.UNICODE)
+START_RE = re.compile(r"^(主旨|主文)\s*[:：]?\s*", re.UNICODE)
+
+def _clean_line(line: str) -> str:
+    line = line.strip()
+    # 去掉行首 . .. ... 之類
+    line = re.sub(r"^\.{1,}\s*", "", line)
+    # 全形空白→半形空白，壓縮多重空白
+    line = line.replace("\u3000", " ")
+    line = re.sub(r"\s+", " ", line)
+    return line
+
 def extract_title(text: str) -> str:
-    lines = text.strip().splitlines()
+    lines = text.splitlines()
     capture = False
     collected = []
 
-    for line in lines:
-        line = line.strip()
+    for raw in lines:
+        line = _clean_line(raw)
         if not line:
-            if capture:
+            if capture:  # 已開始抓，遇空行就結束
                 break
             continue
 
-        # 去掉開頭的「. .. ...」噪音
-        line = re.sub(r"^\.{1,}\s*", "", line)
-
-        # 開始條件
-        if not capture and re.search(r"(主旨|案由|標題)\s*[:：]", line):
-            capture = True
-            # 去掉「主旨：」
-            line = re.sub(r"^(主旨|案由|標題)\s*[:：]\s*", "", line)
-            if line:
-                collected.append(line)
+        if not capture:
+            # 行首出現 主旨/案由/標題（冒號可有可無）就開始擷取
+            if START_RE.search(line):
+                capture = True
+                line = START_RE.sub("", line)  # 去掉「主旨：」
+                if line:
+                    collected.append(line)
+            # 未開始且未命中就繼續掃下一行
             continue
-
-        # 停止條件
-        if capture and any(sw in line for sw in STOP_WORDS):
-            break
-
-        # 拼接
-        if capture:
+        else:
+            # 只在「行首」遇到欄位名才停止
+            if STOP_RE.search(line):
+                break
             collected.append(line)
 
-    return " ".join(collected) if collected else (lines[0] if lines else "")
-
-
-    # fallback: 如果完全沒抓到，就用第一行
-    return " ".join(collected) if collected else (lines[0] if lines else "")
+    title = " ".join(collected).strip()
+    # 再次壓縮空白，防止跨行拼接留下多餘空格
+    title = re.sub(r"\s+", " ", title)
+    return title
 
 def make_jsonl(input_dir="output_data/train", output_file="train.jsonl"):
     input_dir = Path(input_dir)
