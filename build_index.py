@@ -1,81 +1,56 @@
-# build_index.py
 import json
 from pathlib import Path
-from typing import Iterator, List, Dict
-
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-# ====== 基本設定 ======
-DATA_JSONL = "train.jsonl"              # 你剛輸出的訓練 jsonl
-DB_PATH    = "chroma_db"                # 向量庫持久化目錄
-COLLECTION = "gov_letters"             # 集合名稱（同一庫只要一致）
+# ===== 基本設定 =====
+DATA_JSONL = "train.jsonl"       # 你剛輸出的訓練資料
+DB_PATH = "chroma_db"            # 向量庫目錄
+COLLECTION = "gov_letters"       # collection 名稱
 
-# HNSW 參數（可依量級微調）
-HNSW_SPACE = "cosine"                  # 餘弦相似度（搭配 L2 normalize）
-HNSW_M = 32
-HNSW_EF_CONSTRUCTION = 200
-
-# 批次設定
-BATCH_SIZE = 256
-
-# ====== 載入 embedding 模型（CPU 也可）
+# ===== 載入 embedding 模型 =====
 encoder = SentenceTransformer("intfloat/multilingual-e5-large")
 
-def load_jsonl(path: str) -> Iterator[Dict]:
+# ===== 初始化 DB =====
+client = chromadb.PersistentClient(path=DB_PATH)
+
+# 建立或取得 collection，只指定 cosine
+collection = client.get_or_create_collection(
+    name=COLLECTION,
+    metadata={"hnsw:space": "cosine"}
+)
+
+# ===== 載入 jsonl =====
+def load_jsonl(path: str):
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 yield json.loads(line)
 
-def batched(iterable: Iterator[Dict], n: int) -> Iterator[List[Dict]]:
-    batch = []
-    for item in iterable:
-        batch.append(item)
-        if len(batch) >= n:
-            yield batch
-            batch = []
-    if batch:
-        yield batch
-
-def main():
-    # 1) 啟用持久化客戶端
-    client = chromadb.PersistentClient(path=DB_PATH)
-
-    # 2) 建立/取得集合（指定 HNSW + cosine；並可設定 M/efConstruction）
-    collection = client.get_or_create_collection(
-        name=COLLECTION,
-        metadata={
-            "hnsw:space": HNSW_SPACE,
-            "hnsw:M": HNSW_M,
-            "hnsw:efConstruction": HNSW_EF_CONSTRUCTION,
-        },
-    )
-
-    # 3) 批次寫入
+# ===== 建庫 =====
+def build_collection():
     total = 0
-    for batch in batched(load_jsonl(DATA_JSONL), BATCH_SIZE):
-        ids = [rec["id"] for rec in batch]  # 確保唯一（重複會報錯；要覆蓋可改用 upsert）
-        docs = [rec["title"] for rec in batch]
-        metas = [{"label": rec["label"]} for rec in batch]
-
-        # 3a) 生成向量（**務必 L2 normalize**）
-        embs = encoder.encode(docs, normalize_embeddings=True, batch_size=64).tolist()
-
-        # 3b) 寫入 Chroma
-        collection.add(ids=ids, documents=docs, embeddings=embs, metadatas=metas)
+    batch_size = 64
+    records = list(load_jsonl(DATA_JSONL))
+    for i in range(0, len(records), batch_size):
+        batch = records[i:i + batch_size]
+        ids = [r["id"] for r in batch]
+        docs = [r["title"] for r in batch]
+        metas = [{"label": r["label"]} for r in batch]
+        embs = encoder.encode(docs, normalize_embeddings=True, batch_size=32).tolist()
+        collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embs)
         total += len(batch)
-        print(f"Indexed so far: {total}")
+        print(f"已索引 {total} 筆")
+    print(f"✅ 建庫完成，共 {collection.count()} 筆向量")
 
-    # 4) 驗證：集合大小 & 簡單查詢
-    count = collection.count()
-    print(f"Collection '{COLLECTION}' ready. Total vectors: {count}")
-
-    # 測試一筆查詢（可改成你的文字）
-    demo_query = "請於文到期限內查復保單相關資料"
-    q_emb = encoder.encode([demo_query], normalize_embeddings=True).tolist()
-    res = collection.query(query_embeddings=q_emb, n_results=5)
-    print("Top-5 labels:", [m["label"] for m in res["metadatas"][0]])
+# ===== 快速檢查 DB 內容 =====
+def inspect_collection(limit=3):
+    print(f"\nCollection: {COLLECTION}")
+    print("總筆數:", collection.count())
+    res = collection.get(limit=limit)
+    for i in range(len(res["ids"])):
+        print(f"[{i+1}] ID={res['ids'][i]} | Label={res['metadatas'][i].get('label')} | Title={res['documents'][i][:40]}...")
 
 if __name__ == "__main__":
-    main()
+    build_collection()
+    inspect_collection()
